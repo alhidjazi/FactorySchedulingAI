@@ -1,9 +1,9 @@
 import pytest
 
 from factory_sim.enums import MachineStatus
+from factory_sim.job import Job
 from factory_sim.machine import Machine
 from factory_sim.operation import Operation
-from factory_sim.job import Job
 
 
 def test_operation_creation():
