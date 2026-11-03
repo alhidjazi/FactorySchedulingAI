@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # AI-Based Dynamic Factory Production Scheduling
 
 ## Research Project
@@ -79,3 +80,7 @@ and documented configuration files.
 
 Phase 1: Python environment setup - completed.
 Phase 2: Project architecture setup - in progress.
+=======
+# FactorySchedulingAI
+AI-Based Dynamic Factory Production Scheduling Using Reinforcement Learning
+>>>>>>> origin/main
