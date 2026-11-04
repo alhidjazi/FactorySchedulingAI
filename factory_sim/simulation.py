@@ -1,5 +1,6 @@
 import simpy
 
+from factory_sim.enums import MachineStatus
 from factory_sim.factory import Factory
 
 
@@ -12,6 +13,9 @@ class SimulationEngine:
 
         self._reserved_machines: set[str] = set()
         self._reserved_jobs: set[str] = set()
+
+        self._breakdown_events: dict[str, simpy.Event] = {}
+        self._scheduled_breakdowns: set[str] = set()
 
     @property
     def current_time(self) -> float:
@@ -34,11 +38,61 @@ class SimulationEngine:
             }
         )
 
-    def schedule_operation(
+    def schedule_breakdown(
         self,
-        job_id: str,
         machine_id: str,
+        breakdown_time: float,
+        repair_time: float,
     ):
+        """Schedule one deterministic breakdown at an absolute time."""
+        machine = self.factory.get_machine(machine_id)
+
+        if breakdown_time < self.current_time:
+            raise ValueError("Breakdown time cannot be in the past.")
+
+        if repair_time <= 0:
+            raise ValueError("Repair time must be positive.")
+
+        if machine_id in self._scheduled_breakdowns:
+            raise RuntimeError(
+                f"A breakdown is already scheduled for {machine_id}."
+            )
+
+        if machine.status == MachineStatus.DOWN:
+            raise RuntimeError(f"Machine {machine_id} is already down.")
+
+        self._scheduled_breakdowns.add(machine_id)
+        breakdown_event = self.env.event()
+        self._breakdown_events[machine_id] = breakdown_event
+
+        return self.env.process(
+            self._trigger_breakdown(
+                machine_id,
+                breakdown_time,
+                repair_time,
+                breakdown_event,
+            )
+        )
+
+    def _trigger_breakdown(
+        self,
+        machine_id: str,
+        breakdown_time: float,
+        repair_time: float,
+        breakdown_event: simpy.Event,
+    ):
+        yield self.env.timeout(breakdown_time - self.current_time)
+
+        machine = self.factory.get_machine(machine_id)
+
+        if machine.status != MachineStatus.BUSY:
+            self._scheduled_breakdowns.discard(machine_id)
+            self._breakdown_events.pop(machine_id, None)
+            return
+
+        breakdown_event.succeed(repair_time)
+
+    def schedule_operation(self, job_id: str, machine_id: str):
         """Schedule only the current operation of a job."""
         job = self.factory.get_job(job_id)
         machine = self.factory.get_machine(machine_id)
@@ -90,12 +144,7 @@ class SimulationEngine:
         job_id: str,
         machine_assignments: dict[str, str],
     ):
-        """
-        Schedule all remaining operations of a job sequentially.
-
-        machine_assignments maps operation IDs to machine IDs.
-        Example: {"O1": "M1", "O2": "M2"}
-        """
+        """Schedule all remaining operations of a job sequentially."""
         job = self.factory.get_job(job_id)
 
         if job.is_completed:
@@ -117,9 +166,7 @@ class SimulationEngine:
             for operation in remaining_operations
         }
 
-        supplied_operation_ids = set(machine_assignments)
-
-        if supplied_operation_ids != required_operation_ids:
+        if set(machine_assignments) != required_operation_ids:
             raise ValueError(
                 "Machine assignments must contain exactly "
                 "the remaining operation IDs."
@@ -177,6 +224,7 @@ class SimulationEngine:
         finally:
             self._reserved_jobs.discard(job_id)
 
+    
     def _execute_operation(self, job_id: str, machine_id: str):
         job = self.factory.get_job(job_id)
         machine = self.factory.get_machine(machine_id)
@@ -188,7 +236,7 @@ class SimulationEngine:
                 f"Job {job_id} has no remaining operations."
             )
 
-        processing_time = operation.get_processing_time(machine_id)
+        remaining_time = operation.get_processing_time(machine_id)
 
         machine.start_operation(job_id, operation.operation_id)
 
@@ -199,9 +247,64 @@ class SimulationEngine:
             operation.operation_id,
         )
 
-        yield self.env.timeout(processing_time)
+        while remaining_time > 0:
+            segment_start = self.current_time
 
-        machine.finish_operation(processing_time)
+            breakdown_event = self._breakdown_events.get(machine_id)
+
+            if breakdown_event is None:
+                yield self.env.timeout(remaining_time)
+                break
+
+            result = yield (
+                self.env.timeout(remaining_time) | breakdown_event
+            )
+
+            elapsed = self.current_time - segment_start
+            remaining_time -= elapsed
+
+            if breakdown_event not in result:
+                break
+
+            # Üretim sırasında geçen süreyi kaydet.
+            machine.total_busy_time += elapsed
+
+            repair_time = result[breakdown_event]
+
+            machine.set_down()
+
+            self._record_event(
+                "machine_breakdown",
+                machine_id,
+                job_id,
+                operation.operation_id,
+            )
+
+            self._record_event(
+                "repair_started",
+                machine_id,
+                job_id,
+                operation.operation_id,
+            )
+
+            yield self.env.timeout(repair_time)
+
+            machine.repair(repair_time)
+
+            self._record_event(
+                "repair_completed",
+                machine_id,
+                job_id,
+                operation.operation_id,
+            )
+
+            self._breakdown_events.pop(machine_id, None)
+            self._scheduled_breakdowns.discard(machine_id)
+
+        # Yalnızca son üretim segmentini kaydet.
+        # Önceki segmentler arıza anında zaten kaydedilmişti.
+        machine.finish_operation(remaining_time)
+
         job.complete_current_operation()
 
         self._record_event(

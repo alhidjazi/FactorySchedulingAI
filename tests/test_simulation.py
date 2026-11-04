@@ -1,5 +1,6 @@
 import pytest
 
+from factory_sim.enums import MachineStatus
 from factory_sim.factory import Factory
 from factory_sim.job import Job
 from factory_sim.machine import Machine
@@ -254,3 +255,79 @@ def test_schedule_job_rejects_duplicate_scheduling():
                 "O3": "M1",
             },
         )
+
+
+def test_machine_breakdown_resumes_remaining_processing_time():
+    factory = create_test_factory()
+    engine = SimulationEngine(factory)
+
+    engine.schedule_breakdown(
+        machine_id="M1",
+        breakdown_time=4.0,
+        repair_time=5.0,
+    )
+
+    engine.schedule_operation("J1", "M1")
+    engine.run()
+
+    machine = factory.get_machine("M1")
+    job = factory.get_job("J1")
+
+    # 4 birim üretim + 5 birim onarım + 6 birim üretim.
+    assert engine.current_time == 15.0
+
+    # Operasyon baştan başlamamalı.
+    assert machine.total_busy_time == 10.0
+
+    assert machine.total_down_time == 5.0
+
+    assert machine.is_available
+    assert job.is_completed
+
+
+def test_machine_breakdown_event_logging():
+    factory = create_test_factory()
+    engine = SimulationEngine(factory)
+
+    engine.schedule_breakdown("M1", 4.0, 5.0)
+    engine.schedule_operation("J1", "M1")
+    engine.run()
+
+    events = [
+        (event["event"], event["time"])
+        for event in engine.event_log
+    ]
+
+    assert events == [
+        ("operation_started", 0),
+        ("machine_breakdown", 4.0),
+        ("repair_started", 4.0),
+        ("repair_completed", 9.0),
+        ("operation_completed", 15.0),
+    ]
+
+
+def test_machine_breakdown_preserves_operation_state():
+    factory = create_test_factory()
+    engine = SimulationEngine(factory)
+
+    machine = factory.get_machine("M1")
+
+    engine.schedule_breakdown("M1", 4.0, 5.0)
+    engine.schedule_operation("J1", "M1")
+
+    # Arıza zamanına kadar simülasyonu çalıştır.
+    engine.run(until=4.5)
+
+    assert machine.status == MachineStatus.DOWN
+    assert machine.current_job_id == "J1"
+    assert machine.current_operation_id == "O1"
+
+    # Onarım tamamlandıktan sonra üretim devam etmiş olmalı.
+    engine.run()
+
+    assert machine.status == MachineStatus.IDLE
+    assert machine.current_job_id is None
+    assert machine.current_operation_id is None
+
+    assert factory.get_job("J1").is_completed
