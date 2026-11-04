@@ -1,3 +1,5 @@
+from math import isfinite
+
 import simpy
 
 from factory_sim.enums import MachineStatus
@@ -47,11 +49,14 @@ class SimulationEngine:
         """Schedule one deterministic breakdown at an absolute time."""
         machine = self.factory.get_machine(machine_id)
 
+        if not isfinite(breakdown_time):
+            raise ValueError("Breakdown time must be finite.")
+
         if breakdown_time < self.current_time:
             raise ValueError("Breakdown time cannot be in the past.")
 
-        if repair_time <= 0:
-            raise ValueError("Repair time must be positive.")
+        if not isfinite(repair_time) or repair_time <= 0:
+            raise ValueError("Repair time must be finite and positive.")
 
         if machine_id in self._scheduled_breakdowns:
             raise RuntimeError(
@@ -83,6 +88,10 @@ class SimulationEngine:
     ):
         yield self.env.timeout(breakdown_time - self.current_time)
 
+        # Arıza planı iptal edilmişse zamanlayıcı işlem yapmamalı.
+        if self._breakdown_events.get(machine_id) is not breakdown_event:
+            return
+        
         machine = self.factory.get_machine(machine_id)
 
         if machine.status != MachineStatus.BUSY:
@@ -115,16 +124,19 @@ class SimulationEngine:
                 f"operation {operation.operation_id}."
             )
 
-        if (
-            not machine.is_available
-            or machine_id in self._reserved_machines
-        ):
-            raise RuntimeError(
-                f"Machine {machine_id} is not available."
-            )
+        # Makineyi yalnızca Job üretime başlayabilecekse rezerve et.
+        if self.current_time >= job.release_time:
+            if (
+                not machine.is_available
+                or machine_id in self._reserved_machines
+            ):
+                raise RuntimeError(
+                    f"Machine {machine_id} is not available."
+                )
+
+            self._reserved_machines.add(machine_id)
 
         self._reserved_jobs.add(job_id)
-        self._reserved_machines.add(machine_id)
 
         return self.env.process(
             self._run_single_operation(job_id, machine_id)
@@ -132,9 +144,31 @@ class SimulationEngine:
 
     def _run_single_operation(self, job_id: str, machine_id: str):
         try:
+            job = self.factory.get_job(job_id)
+            machine = self.factory.get_machine(machine_id)
+
+            # Job'ın üretime başlayabileceği zamanı bekle.
+            if self.current_time < job.release_time:
+                yield self.env.timeout(
+                    job.release_time - self.current_time
+                )
+
+            # Daha önce rezerve edilmemişse şimdi rezerve et.
+            if machine_id not in self._reserved_machines:
+                if (
+                    not machine.is_available
+                    or machine_id in self._reserved_machines
+                ):
+                    raise RuntimeError(
+                        f"Machine {machine_id} is not available."
+                    )
+
+                self._reserved_machines.add(machine_id)
+
             yield self.env.process(
                 self._execute_operation(job_id, machine_id)
             )
+
         finally:
             self._reserved_machines.discard(machine_id)
             self._reserved_jobs.discard(job_id)
@@ -204,6 +238,12 @@ class SimulationEngine:
                 ]
                 machine = self.factory.get_machine(machine_id)
 
+                # İlk operasyon için release time beklenir.
+                if self.current_time < job.release_time:
+                    yield self.env.timeout(
+                        job.release_time - self.current_time
+                    )
+
                 if (
                     not machine.is_available
                     or machine_id in self._reserved_machines
@@ -223,7 +263,6 @@ class SimulationEngine:
 
         finally:
             self._reserved_jobs.discard(job_id)
-
     
     def _execute_operation(self, job_id: str, machine_id: str):
         job = self.factory.get_job(job_id)
@@ -247,12 +286,15 @@ class SimulationEngine:
             operation.operation_id,
         )
 
+        last_segment_time = 0.0
+
         while remaining_time > 0:
             segment_start = self.current_time
 
             breakdown_event = self._breakdown_events.get(machine_id)
 
             if breakdown_event is None:
+                last_segment_time = remaining_time
                 yield self.env.timeout(remaining_time)
                 break
 
@@ -261,12 +303,21 @@ class SimulationEngine:
             )
 
             elapsed = self.current_time - segment_start
-            remaining_time -= elapsed
+            remaining_time = max(0.0, remaining_time - elapsed)
+            last_segment_time = elapsed
+
+            # Operasyon tamamlandıysa arıza kontrolüne gerek yok.
+            # Aynı anda gerçekleşen olaylarda operasyon tamamlanmasına öncelik verilir.
+            if remaining_time <= 0:
+                # Operasyon tamamlandı: aynı zamana denk gelen arızayı iptal et.
+                self._breakdown_events.pop(machine_id, None)
+                self._scheduled_breakdowns.discard(machine_id)
+                break
 
             if breakdown_event not in result:
                 break
 
-            # Üretim sırasında geçen süreyi kaydet.
+            # Arıza öncesinde gerçekleşen üretim süresini kaydet.
             machine.total_busy_time += elapsed
 
             repair_time = result[breakdown_event]
@@ -302,8 +353,7 @@ class SimulationEngine:
             self._scheduled_breakdowns.discard(machine_id)
 
         # Yalnızca son üretim segmentini kaydet.
-        # Önceki segmentler arıza anında zaten kaydedilmişti.
-        machine.finish_operation(remaining_time)
+        machine.finish_operation(last_segment_time)
 
         job.complete_current_operation()
 

@@ -331,3 +331,192 @@ def test_machine_breakdown_preserves_operation_state():
     assert machine.current_operation_id is None
 
     assert factory.get_job("J1").is_completed
+
+def test_operation_completes_before_scheduled_breakdown():
+    factory = create_test_factory()
+    engine = SimulationEngine(factory)
+
+    engine.schedule_breakdown(
+        machine_id="M1",
+        breakdown_time=20.0,
+        repair_time=5.0,
+    )
+
+    engine.schedule_operation("J1", "M1")
+    engine.run()
+
+    machine = factory.get_machine("M1")
+    job = factory.get_job("J1")
+
+    assert job.is_completed
+    assert machine.is_available
+
+    assert machine.total_busy_time == 10.0
+    assert machine.total_down_time == 0.0
+
+    assert [
+        event["event"]
+        for event in engine.event_log
+    ] == [
+        "operation_started",
+        "operation_completed",
+    ]
+
+def test_operation_completion_takes_priority_over_simultaneous_breakdown():
+    factory = create_test_factory()
+    engine = SimulationEngine(factory)
+
+    engine.schedule_breakdown(
+        machine_id="M1",
+        breakdown_time=10.0,
+        repair_time=5.0,
+    )
+
+    engine.schedule_operation("J1", "M1")
+    engine.run()
+
+    machine = factory.get_machine("M1")
+    job = factory.get_job("J1")
+
+    assert job.is_completed
+    assert machine.is_available
+
+    assert machine.total_busy_time == 10.0
+    assert machine.total_down_time == 0.0
+
+    assert [
+        event["event"]
+        for event in engine.event_log
+    ] == [
+        "operation_started",
+        "operation_completed",
+    ]
+
+    assert "M1" not in engine._breakdown_events
+    assert "M1" not in engine._scheduled_breakdowns
+
+def test_job_cannot_start_before_release_time():
+    factory = Factory("F1")
+    factory.add_machine(Machine("M1"))
+
+    factory.add_job(
+        Job(
+            job_id="J1",
+            release_time=10.0,
+            due_date=30.0,
+            operations=[
+                Operation("O1", {"M1": 5.0}),
+            ],
+        )
+    )
+
+    engine = SimulationEngine(factory)
+
+    engine.schedule_operation("J1", "M1")
+    engine.run()
+
+    events = engine.event_log
+
+    assert events[0]["event"] == "operation_started"
+    assert events[0]["time"] == 10.0
+
+    assert events[1]["event"] == "operation_completed"
+    assert events[1]["time"] == 15.0
+
+
+def test_job_with_zero_release_time_starts_immediately():
+    factory = Factory("F1")
+    factory.add_machine(Machine("M1"))
+
+    factory.add_job(
+        Job(
+            job_id="J1",
+            release_time=0.0,
+            due_date=30.0,
+            operations=[
+                Operation("O1", {"M1": 5.0}),
+            ],
+        )
+    )
+
+    engine = SimulationEngine(factory)
+
+    engine.schedule_operation("J1", "M1")
+    engine.run()
+
+    assert engine.event_log[0]["time"] == 0.0
+
+def test_machine_is_not_reserved_before_job_release_time():
+    factory = Factory("F1")
+    factory.add_machine(Machine("M1"))
+
+    factory.add_job(
+        Job(
+            job_id="J1",
+            release_time=10.0,
+            due_date=30.0,
+            operations=[
+                Operation("O1", {"M1": 5.0}),
+            ],
+        )
+    )
+
+    factory.add_job(
+        Job(
+            job_id="J2",
+            release_time=0.0,
+            due_date=30.0,
+            operations=[
+                Operation("O2", {"M1": 3.0}),
+            ],
+        )
+    )
+
+    engine = SimulationEngine(factory)
+
+    engine.schedule_operation("J1", "M1")
+
+    # J1 henüz üretime başlayamaz.
+    # M1 başka bir job için kullanılabilir olmalı.
+    assert "M1" not in engine._reserved_machines
+
+    engine.schedule_operation("J2", "M1")
+    engine.run()
+
+    assert factory.get_job("J2").is_completed
+    assert factory.get_job("J1").is_completed
+
+@pytest.mark.parametrize(
+    "breakdown_time",
+    [float("nan"), float("inf")],
+)
+def test_schedule_breakdown_rejects_non_finite_breakdown_time(
+    breakdown_time,
+):
+    factory = create_test_factory()
+    engine = SimulationEngine(factory)
+
+    with pytest.raises(ValueError):
+        engine.schedule_breakdown(
+            "M1",
+            breakdown_time,
+            5.0,
+        )
+
+
+@pytest.mark.parametrize(
+    "repair_time",
+    [float("nan"), float("inf"), 0.0, -1.0],
+)
+def test_schedule_breakdown_rejects_invalid_repair_time(
+    repair_time,
+):
+    factory = create_test_factory()
+    engine = SimulationEngine(factory)
+
+    with pytest.raises(ValueError):
+        engine.schedule_breakdown(
+            "M1",
+            5.0,
+            repair_time,
+        )
