@@ -1,0 +1,268 @@
+from itertools import combinations
+from pathlib import Path
+
+import pandas as pd
+from scipy.stats import rankdata, wilcoxon
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+RESULTS_DIR = PROJECT_ROOT / "results"
+
+INPUT_PATTERN = "baseline_*.csv"
+OUTPUT_FILE = RESULTS_DIR / "statistical_tests.csv"
+
+METRICS = [
+    "makespan",
+    "mean_flow_time",
+    "total_tardiness",
+    "mean_tardiness",
+    "overall_machine_utilization",
+    "utilization_M1",
+    "utilization_M2",
+    "utilization_M3",
+]
+
+SCHEDULERS = ["FIFO", "SPT", "EDD"]
+ALPHA = 0.05
+
+
+def load_results() -> pd.DataFrame:
+    """Load all benchmark results."""
+
+    files = sorted(RESULTS_DIR.glob(INPUT_PATTERN))
+
+    if not files:
+        raise FileNotFoundError(
+            f"No benchmark CSV files found in {RESULTS_DIR}"
+        )
+
+    frames = [pd.read_csv(file) for file in files]
+    results = pd.concat(frames, ignore_index=True)
+
+    required = ["scenario_id", "seed", "scheduler"] + METRICS
+
+    missing = [
+        column for column in required
+        if column not in results.columns
+    ]
+
+    if missing:
+        raise ValueError(f"Missing columns: {missing}")
+
+    if results[required].isnull().any().any():
+        raise ValueError("Missing values detected.")
+
+    if results.duplicated(
+        subset=["scenario_id", "seed", "scheduler"]
+    ).any():
+        raise ValueError("Duplicate experiment records detected.")
+
+    return results
+
+
+def calculate_effect_size(a, b) -> float:
+    """
+    Calculate matched-pairs rank-biserial correlation.
+
+    Positive values indicate that algorithm A has higher
+    values than algorithm B.
+    """
+
+    differences = a - b
+    differences = differences[differences != 0]
+
+    if len(differences) == 0:
+        return 0.0
+
+    ranks = rankdata(abs(differences))
+
+    positive_rank_sum = ranks[differences > 0].sum()
+    negative_rank_sum = ranks[differences < 0].sum()
+
+    total_rank_sum = positive_rank_sum + negative_rank_sum
+
+    if total_rank_sum == 0:
+        return 0.0
+
+    return (
+        positive_rank_sum - negative_rank_sum
+    ) / total_rank_sum
+
+
+def holm_correction(p_values):
+    """Apply Holm-Bonferroni correction."""
+
+    p_values = list(p_values)
+    count = len(p_values)
+
+    order = sorted(
+        range(count),
+        key=lambda index: p_values[index],
+    )
+
+    adjusted = [0.0] * count
+    running_max = 0.0
+
+    for rank, index in enumerate(order):
+        corrected = min(
+            1.0,
+            (count - rank) * p_values[index],
+        )
+
+        running_max = max(running_max, corrected)
+        adjusted[index] = running_max
+
+    return adjusted
+
+
+def run_pairwise_tests(
+    results: pd.DataFrame,
+) -> pd.DataFrame:
+    """Run paired Wilcoxon tests for each scenario and metric."""
+
+    records = []
+
+    for scenario in sorted(results["scenario_id"].unique()):
+
+        scenario_data = results[
+            results["scenario_id"] == scenario
+        ]
+
+        for metric in METRICS:
+
+            comparisons = []
+
+            for scheduler_a, scheduler_b in combinations(
+                SCHEDULERS, 2
+            ):
+
+                data_a = (
+                    scenario_data[
+                        scenario_data["scheduler"] == scheduler_a
+                    ]
+                    .set_index("seed")[metric]
+                )
+
+                data_b = (
+                    scenario_data[
+                        scenario_data["scheduler"] == scheduler_b
+                    ]
+                    .set_index("seed")[metric]
+                )
+
+                paired = pd.concat(
+                    [data_a, data_b],
+                    axis=1,
+                    keys=["A", "B"],
+                    join="inner",
+                ).sort_index()
+
+                if len(paired) < 2:
+                    raise ValueError(
+                        f"Insufficient paired seeds: {scenario}"
+                    )
+
+                if len(paired) != 5:
+                    print(
+                        f"WARNING: {scenario}, {metric}, "
+                        f"{scheduler_a} vs {scheduler_b}: "
+                        f"{len(paired)} paired seeds"
+                    )
+
+                a = paired["A"]
+                b = paired["B"]
+
+                test = wilcoxon(
+                    a,
+                    b,
+                    alternative="two-sided",
+                    method="auto",
+                    zero_method="wilcox",
+                )
+
+                comparisons.append({
+                    "scenario_id": scenario,
+                    "metric": metric,
+                    "scheduler_a": scheduler_a,
+                    "scheduler_b": scheduler_b,
+                    "paired_seeds": len(paired),
+                    "mean_a": a.mean(),
+                    "mean_b": b.mean(),
+                    "mean_difference_a_minus_b": (
+                        a - b
+                    ).mean(),
+                    "wilcoxon_statistic": test.statistic,
+                    "p_value": test.pvalue,
+                    "effect_size_rank_biserial": (
+                        calculate_effect_size(a, b)
+                    ),
+                })
+
+            adjusted_p = holm_correction([
+                item["p_value"] for item in comparisons
+            ])
+
+            for item, corrected_p in zip(
+                comparisons, adjusted_p
+            ):
+                item["p_adjusted_holm"] = corrected_p
+                item["significant"] = (
+                    corrected_p < ALPHA
+                )
+
+                records.append(item)
+
+    return pd.DataFrame(records)
+
+
+def main():
+    print("=" * 65)
+    print("PAIRED STATISTICAL SIGNIFICANCE ANALYSIS")
+    print("=" * 65)
+
+    results = load_results()
+
+    print(f"Experiments loaded: {len(results)}")
+
+    summary = run_pairwise_tests(results)
+
+    OUTPUT_FILE.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    summary.to_csv(OUTPUT_FILE, index=False)
+
+    print("\nMAKESPAN STATISTICAL TESTS")
+    print("=" * 65)
+
+    makespan_results = summary[
+        summary["metric"] == "makespan"
+    ]
+
+    display_columns = [
+        "scenario_id",
+        "scheduler_a",
+        "scheduler_b",
+        "wilcoxon_statistic",
+        "p_value",
+        "p_adjusted_holm",
+        "effect_size_rank_biserial",
+        "significant",
+    ]
+
+    print(
+        makespan_results[display_columns].to_string(
+            index=False,
+            float_format=lambda value: f"{value:.4f}",
+        )
+    )
+
+    print("\n" + "=" * 65)
+    print(f"Total pairwise tests: {len(summary)}")
+    print(f"Significant tests: {summary['significant'].sum()}")
+    print(f"Results saved to: {OUTPUT_FILE}")
+    print("=" * 65)
+
+
+if __name__ == "__main__":
+    main()

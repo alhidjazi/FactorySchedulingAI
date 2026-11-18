@@ -13,6 +13,7 @@ from factory_sim.simulation import SimulationEngine
 @dataclass(frozen=True)
 class BenchmarkResult:
     scenario_id: str
+    seed: int
     scheduler: str
     makespan: float
     mean_flow_time: float
@@ -50,6 +51,7 @@ def run_benchmark(
         results.append(
             BenchmarkResult(
                 scenario_id=config.scenario_id,
+                seed=config.seed,
                 scheduler=scheduler_name,
                 makespan=metrics.makespan,
                 mean_flow_time=metrics.mean_flow_time,
