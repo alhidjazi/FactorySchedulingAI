@@ -239,6 +239,81 @@ The following components have been implemented and tested:
 - Simulation performance metrics.
 - Automated test suite.
 
-**Current development stage:** Preparation for benchmarking classical scheduling algorithms.
+**Current development stage:** Initial benchmarking of classical scheduling algorithms.
 
-The next objective is to establish a reproducible benchmark framework before implementing the reinforcement learning environment and PPO agent.
+The benchmark infrastructure has been implemented, and the first comparative experiment using seed=42 has been completed.
+
+SPT achieved the best results in makespan, mean flow time, and tardiness metrics in this initial scenario.
+
+The next objective is to evaluate the robustness of these results across multiple random seeds, workload levels, and due-date tightness configurations before proceeding to reinforcement learning.
+
+
+## 10. Preliminary Baseline Benchmark Results
+
+**Experiment Status: Initial Benchmark Completed**
+
+The first comparative benchmark was successfully conducted using the implemented classical scheduling algorithms.
+
+### Experimental Configuration
+
+| Parameter | Value |
+|---|---|
+| Random Seed | 42 |
+| Scheduling Algorithms | FIFO, SPT, EDD |
+| Simulation Environment | SimPy |
+| Evaluation | Identical factory scenario |
+| Metrics | Makespan, Mean Flow Time, Total Tardiness, Mean Tardiness, Machine Utilization |
+
+### Benchmark Results
+
+| Performance Metric | FIFO | SPT | EDD |
+|---|---:|---:|---:|
+| Makespan | 87.98 | **76.25** | 82.98 |
+| Mean Flow Time | 46.46 | **35.86** | 37.69 |
+| Total Tardiness | 227.63 | **121.63** | 141.14 |
+| Mean Tardiness | 22.76 | **12.16** | 14.11 |
+| Overall Machine Utilization | **89.41%** | 80.00% | 83.96% |
+
+### Initial Performance Analysis
+
+SPT achieved the best results across three major scheduling performance dimensions in this experimental scenario:
+
+- Makespan
+- Mean Flow Time
+- Total Tardiness
+
+Compared with FIFO, SPT achieved the following improvements:
+
+| Metric | Improvement |
+|---|---:|
+| Makespan | 13.33% |
+| Mean Flow Time | 22.82% |
+| Total Tardiness | 46.57% |
+
+These results indicate that SPT was particularly effective at reducing job completion times and delivery delays in the initial scenario.
+
+### Machine Utilization Analysis
+
+FIFO achieved the highest overall machine utilization (89.41%), followed by EDD (83.96%) and SPT (80.00%).
+
+However, higher machine utilization does not necessarily indicate better overall scheduling performance.
+
+In this experiment, SPT achieved a shorter makespan and lower flow time and tardiness despite its lower aggregate utilization. Therefore, machine utilization should be interpreted together with other performance metrics.
+
+### Research Interpretation and Limitations
+
+The initial experiment provides preliminary evidence that SPT can outperform FIFO and EDD under the evaluated factory scenario.
+
+However, these findings must not be interpreted as evidence of general algorithmic superiority.
+
+The experiment was conducted using a single random seed (seed=42). Further experiments are required to evaluate whether the observed performance differences remain consistent under different conditions.
+
+The next experimental steps are:
+
+- Evaluate multiple random seeds.
+- Investigate different production workload levels.
+- Examine different due-date tightness configurations.
+- Analyze the consistency and variability of scheduling performance.
+- Compare the classical baselines under dynamic manufacturing conditions.
+
+These experiments will establish a stronger baseline for the subsequent evaluation of the PPO-based reinforcement learning scheduling agent.
